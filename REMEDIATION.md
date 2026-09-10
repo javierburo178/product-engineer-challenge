@@ -21,3 +21,9 @@ Each entry: symptom → root cause → fix. Test that guards it in `test/*.e2e-s
 - **Cause:** `buildCategoryTree` recursed into `category.parent` / `category.children` that `findCategory` never loaded (one level only), so level 2+ hit `undefined.id`.
 - **Fix:** `buildCategoryTree` now takes an id and loads `children` one level per recursion, building the descendant subtree to any depth; the always-broken `parent` walk was dropped (`src/products/products.service.ts`).
 - **Test:** `test/products.e2e-spec.ts` → "500 on multi-level trees".
+
+## #9 — `POST /orders/:id/pay` hangs on retries and 500s on failure
+- **Cause:** `maxRetries = 1000` (a burst of gateway failures could block the request for minutes) and `throw lastError!` surfaced a bare `Error` → generic `500 Internal server error` with no context.
+- **Fix:** retry loop extracted to `src/common/with-retry.ts` and called with `maxRetries = 3`; exhaustion now throws `ServiceUnavailableException` (HTTP 503) with the underlying reason. Order stays `pending` on failure.
+- **Test:** `test/orders.e2e-spec.ts` → "1000 retries + raw Error on failure".
+- **Follow-up (out of scope here):** resilience for external calls (backoff + jitter, timeout, circuit breaker) belongs in a shared policy, and the fake `paymentService` const should become an injectable provider so it can be swapped/retried at the infrastructure layer rather than inside `OrdersService`.

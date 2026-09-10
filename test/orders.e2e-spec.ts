@@ -36,4 +36,33 @@ describe('Orders (e2e)', () => {
       await request(app.getHttpServer()).get('/orders/9999/full').expect(404);
     });
   });
+
+  describe('POST /orders/:id/pay — bug #9: 1000 retries + raw Error on failure', () => {
+    // the fake payment gateway fails when Math.random() < 0.1
+    afterEach(() => jest.restoreAllMocks());
+
+    it('confirms the order when the gateway succeeds', async () => {
+      jest.spyOn(Math, 'random').mockReturnValue(0.9);
+
+      const res = await request(app.getHttpServer()).post('/orders/1/pay').expect(201);
+      expect(res.body.success).toBe(true);
+
+      const order = await request(app.getHttpServer()).get('/orders/1').expect(200);
+      expect(order.body.status).toBe('confirmed');
+    });
+
+    it('gives up quickly with a 503 (not a generic 500) when the gateway keeps failing', async () => {
+      jest.spyOn(Math, 'random').mockReturnValue(0.01);
+
+      const started = Date.now();
+      const res = await request(app.getHttpServer()).post('/orders/1/pay').expect(503);
+      const elapsed = Date.now() - started;
+
+      expect(res.body.message).toMatch(/payment/i);
+      expect(elapsed).toBeLessThan(5000); // 3 attempts, not 1000
+
+      const order = await request(app.getHttpServer()).get('/orders/1').expect(200);
+      expect(order.body.status).toBe('pending'); // unchanged on failure
+    });
+  });
 });

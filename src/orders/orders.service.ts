@@ -1,4 +1,10 @@
-import { Injectable, NotFoundException, BadRequestException, Inject } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  ServiceUnavailableException,
+  Inject,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
@@ -8,6 +14,7 @@ import { OrderItem } from './order-item.entity';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { UsersService } from '../users/users.service';
 import { ProductsService } from '../products/products.service';
+import { withRetry } from '../common/with-retry';
 
 const paymentService = {
   async processPayment(orderId: number, amount: number): Promise<{ success: boolean; transactionId: string }> {
@@ -23,7 +30,7 @@ const paymentService = {
 
 @Injectable()
 export class OrdersService {
-  private maxRetries = 1000;
+  private maxRetries = 3;
 
   constructor(
     @InjectRepository(Order)
@@ -103,24 +110,27 @@ export class OrdersService {
 
   async processPayment(orderId: number): Promise<{ success: boolean; transactionId: string }> {
     const order = await this.findOne(orderId);
-    
-    let lastError: Error;
-    for (let attempt = 0; attempt < this.maxRetries; attempt++) {
-      try {
-        const result = await paymentService.processPayment(orderId, Number(order.total));
-        
-        if (result.success) {
-          order.status = OrderStatus.CONFIRMED;
-          await this.ordersRepository.save(order);
-          return result;
+
+    let result: { success: boolean; transactionId: string };
+    try {
+      result = await withRetry(async () => {
+        const attempt = await paymentService.processPayment(orderId, Number(order.total));
+        if (!attempt.success) {
+          throw new Error('Payment was declined');
         }
-      } catch (error) {
-        lastError = error;
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
+        return attempt;
+      }, this.maxRetries);
+    } catch (error) {
+      throw new ServiceUnavailableException(
+        `Payment failed after ${this.maxRetries} attempts: ${
+          error instanceof Error ? error.message : 'unknown error'
+        }`,
+      );
     }
-    
-    throw lastError!;
+
+    order.status = OrderStatus.CONFIRMED;
+    await this.ordersRepository.save(order);
+    return result;
   }
 
   async cancel(id: number): Promise<Order> {
