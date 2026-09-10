@@ -48,3 +48,8 @@ cause → fix, with the guarding test in `test/*.e2e-spec.ts`.
 - **Fix:** retry loop extracted to `src/common/with-retry.ts` and called with `maxRetries = 3`; exhaustion now throws `ServiceUnavailableException` (HTTP 503) with the underlying reason. Order stays `pending` on failure.
 - **Test:** `test/orders.e2e-spec.ts` → "1000 retries + raw Error on failure".
 - **Follow-up (out of scope here):** resilience for external calls (backoff + jitter, timeout, circuit breaker) belongs in a shared policy, and the fake `paymentService` const should become an injectable provider so it can be swapped/retried at the infrastructure layer rather than inside `OrdersService`.
+
+## #10 / #11 — `DELETE`/`POST /users` surface raw 500s on constraint violations
+- **Cause:** `DELETE /users/:id` for a user with orders hit a FK violation, and `POST /users` with an existing email hit a unique violation — both bubbled up as `500 Internal server error`.
+- **Fix (`src/users/users.service.ts`, helper `src/common/db-errors.ts`):** map PostgreSQL `23503` (FK) and `23505` (unique) to `409 Conflict` with a clear message; `remove` also deletes by id (no entity load) and 404s when nothing was deleted.
+- **Test:** `test/users.e2e-spec.ts` → full endpoint sweep incl. "409s on a duplicate email" and "409s when the user still has orders".
