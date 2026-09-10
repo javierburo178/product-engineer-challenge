@@ -1,16 +1,8 @@
 # Remediation log
 
-Each entry: symptom → root cause → fix. Test that guards it in `test/*.e2e-spec.ts`.
-
-## #3 — `GET /products/search` returns another term's results
-- **Cause:** cache key was the constant `'product-search'`, so the first search's result was served for every later term for 60s.
-- **Fix:** key now includes the term, normalised like the filter does (`` `product-search:${query.toLowerCase().trim()}` ``) in `src/products/products.service.ts`.
-- **Test:** `test/products.e2e-spec.ts` → "cache key ignores the query term".
-
-## #6 — `POST /products/batch` always answers `{ success: true }`
-- **Cause:** per-id errors were caught and dropped (`console.log('Error processing product')`); `success` was hard-coded `true`, so a batch where every id was invalid still looked fine.
-- **Fix:** collect `failed: [{ id, reason }]`, set `success = failed.length === 0`, and reject a missing/empty `productIds` up front (`src/products/products.service.ts`).
-- **Test:** `test/products.e2e-spec.ts` → "swallows errors, always reports success".
+Bugs are numbered by discovery order; they were fixed in dependency order, so
+commit messages may reference them out of sequence. Each entry: symptom → root
+cause → fix, with the guarding test in `test/*.e2e-spec.ts`.
 
 ## #1 — `GET /orders/:id/full` returns 500 for every order
 - **Cause:** `getOrderWithFullDetails` set `user.latestOrder = enriched`, and `enriched` already holds `user` → `JSON.stringify` hit a circular structure and threw.
@@ -22,11 +14,10 @@ Each entry: symptom → root cause → fix. Test that guards it in `test/*.e2e-s
 - **Fix:** `buildCategoryTree` now takes an id and loads `children` one level per recursion, building the descendant subtree to any depth; the always-broken `parent` walk was dropped (`src/products/products.service.ts`).
 - **Test:** `test/products.e2e-spec.ts` → "500 on multi-level trees".
 
-## #9 — `POST /orders/:id/pay` hangs on retries and 500s on failure
-- **Cause:** `maxRetries = 1000` (a burst of gateway failures could block the request for minutes) and `throw lastError!` surfaced a bare `Error` → generic `500 Internal server error` with no context.
-- **Fix:** retry loop extracted to `src/common/with-retry.ts` and called with `maxRetries = 3`; exhaustion now throws `ServiceUnavailableException` (HTTP 503) with the underlying reason. Order stays `pending` on failure.
-- **Test:** `test/orders.e2e-spec.ts` → "1000 retries + raw Error on failure".
-- **Follow-up (out of scope here):** resilience for external calls (backoff + jitter, timeout, circuit breaker) belongs in a shared policy, and the fake `paymentService` const should become an injectable provider so it can be swapped/retried at the infrastructure layer rather than inside `OrdersService`.
+## #3 — `GET /products/search` returns another term's results
+- **Cause:** cache key was the constant `'product-search'`, so the first search's result was served for every later term for 60s.
+- **Fix:** key now includes the term, normalised like the filter does (`` `product-search:${query.toLowerCase().trim()}` ``) in `src/products/products.service.ts`.
+- **Test:** `test/products.e2e-spec.ts` → "cache key ignores the query term".
 
 ## #4 / #5 — `POST /orders` leaves partial data and oversells under load
 - **Cause:**
@@ -41,8 +32,19 @@ Each entry: symptom → root cause → fix. Test that guards it in `test/*.e2e-s
 - **Test:** `test/orders.e2e-spec.ts` → "no transaction + unawaited stock update" (rollback on bad stock / missing product, exact totals, 10-way concurrent no-oversell, cancel restores stock).
 - **Note (pre-existing, separate):** `OrdersService` still injects an unused `CACHE_MANAGER`; safe to drop in its own cleanup.
 
+## #6 — `POST /products/batch` always answers `{ success: true }`
+- **Cause:** per-id errors were caught and dropped (`console.log('Error processing product')`); `success` was hard-coded `true`, so a batch where every id was invalid still looked fine.
+- **Fix:** collect `failed: [{ id, reason }]`, set `success = failed.length === 0`, and reject a missing/empty `productIds` up front (`src/products/products.service.ts`).
+- **Test:** `test/products.e2e-spec.ts` → "swallows errors, always reports success".
+
 ## #7 / #8 — cache ran in-process memory, never Redis; DB index hard-coded to 0
 - **Cause:** `@nestjs/cache-manager@3` pulls `cache-manager@7` (Keyv-based, `stores: [...]` API), but the config passed `store: await redisStore(...)` from `cache-manager-ioredis-yet@2` (built for `cache-manager@5`). `cache-manager@7` ignores the unknown `store` key and silently falls back to an in-memory store — 0 keys ever reached Redis. `db: 0` was also hard-coded, ignoring `REDIS_DB`.
 - **Fix (`src/app.module.ts`):** store is now `createKeyv(`redis://${host}:${port}/${db}`)` from `@keyv/redis`, with `db` read from `REDIS_DB`. Dropped `cache-manager-ioredis-yet` + `ioredis`, added `@keyv/redis` (and `cache-manager` as a direct dep).
-- **Test:** `test/cache.e2e-spec.ts` — a value set on one app instance is readable from a second independent instance (only possible with a shared Redis), and writes land in the `REDIS_DB` logical DB (15 under `.env.test`), not 0.
+- **Test:** `test/cache.e2e-spec.ts` — a value set on one app instance is readable from a second independent instance (only possible with a shared Redis); writes land in the `REDIS_DB` logical DB (15 under `.env.test`), not 0; entries expire after their TTL; reads are served from cache until it is cleared or invalidated.
 - **Aside:** on this machine Redis DB 0 already holds another app's Sidekiq keys — extra reason the index must come from config.
+
+## #9 — `POST /orders/:id/pay` hangs on retries and 500s on failure
+- **Cause:** `maxRetries = 1000` (a burst of gateway failures could block the request for minutes) and `throw lastError!` surfaced a bare `Error` → generic `500 Internal server error` with no context.
+- **Fix:** retry loop extracted to `src/common/with-retry.ts` and called with `maxRetries = 3`; exhaustion now throws `ServiceUnavailableException` (HTTP 503) with the underlying reason. Order stays `pending` on failure.
+- **Test:** `test/orders.e2e-spec.ts` → "1000 retries + raw Error on failure".
+- **Follow-up (out of scope here):** resilience for external calls (backoff + jitter, timeout, circuit breaker) belongs in a shared policy, and the fake `paymentService` const should become an injectable provider so it can be swapped/retried at the infrastructure layer rather than inside `OrdersService`.
