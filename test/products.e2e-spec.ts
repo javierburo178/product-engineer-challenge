@@ -67,4 +67,32 @@ describe('Products (e2e)', () => {
       expect(res.body).toEqual({ success: true, processed: 2, failed: [] });
     });
   });
+
+  describe('GET /categories/:id/tree — bug #2: 500 on multi-level trees', () => {
+    it('returns the full descendant subtree at any depth', async () => {
+      // seeded: Electronics(1) > Computers(2) > Laptops(3)
+      const res = await request(app.getHttpServer()).get('/categories/1/tree').expect(200);
+
+      expect(res.body).toEqual({
+        id: 1,
+        name: 'Electronics',
+        children: [
+          {
+            id: 2,
+            name: 'Computers',
+            children: [{ id: 3, name: 'Laptops', children: [] }],
+          },
+        ],
+      });
+    });
+
+    it('returns a leaf category with no children', async () => {
+      const res = await request(app.getHttpServer()).get('/categories/3/tree').expect(200);
+      expect(res.body).toEqual({ id: 3, name: 'Laptops', children: [] });
+    });
+
+    it('404s for a missing category', async () => {
+      await request(app.getHttpServer()).get('/categories/9999/tree').expect(404);
+    });
+  });
 });

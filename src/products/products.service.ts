@@ -87,26 +87,26 @@ export class ProductsService {
   }
 
   async getCategoryTree(categoryId: number): Promise<any> {
-    const category = await this.findCategory(categoryId);
-    return this.buildCategoryTree(category);
+    await this.findCategory(categoryId); // 404 if the root category is missing
+    return this.buildCategoryTree(categoryId);
   }
 
-  private buildCategoryTree(category: Category): any {
-    const tree: any = {
-      id: category.id,
-      name: category.name,
-      children: [],
+  private async buildCategoryTree(categoryId: number): Promise<any> {
+    // Load one level at a time and recurse, so the tree works at any depth.
+    // The previous version reused a single-level `findCategory` result and
+    // recursed into relations that were never loaded, throwing on level 2+.
+    const category = await this.categoriesRepository.findOne({
+      where: { id: categoryId },
+      relations: ['children'],
+    });
+
+    return {
+      id: category!.id,
+      name: category!.name,
+      children: await Promise.all(
+        (category!.children ?? []).map((child) => this.buildCategoryTree(child.id)),
+      ),
     };
-
-    if (category.parentId) {
-      tree.parent = this.buildCategoryTree(category.parent);
-    }
-
-    if (category.children && category.children.length > 0) {
-      tree.children = category.children.map(child => this.buildCategoryTree(child));
-    }
-
-    return tree;
   }
 
   async processProductBatch(productIds: number[]): Promise<{

@@ -16,3 +16,8 @@ Each entry: symptom → root cause → fix. Test that guards it in `test/*.e2e-s
 - **Cause:** `getOrderWithFullDetails` set `user.latestOrder = enriched`, and `enriched` already holds `user` → `JSON.stringify` hit a circular structure and threw.
 - **Fix:** `latestOrder` is now an acyclic copy of the order without its nested `user` (`src/orders/orders.service.ts`).
 - **Test:** `test/orders.e2e-spec.ts` → "circular reference makes it 500 for every order".
+
+## #2 — `GET /categories/:id/tree` returns 500 for any tree deeper than one level
+- **Cause:** `buildCategoryTree` recursed into `category.parent` / `category.children` that `findCategory` never loaded (one level only), so level 2+ hit `undefined.id`.
+- **Fix:** `buildCategoryTree` now takes an id and loads `children` one level per recursion, building the descendant subtree to any depth; the always-broken `parent` walk was dropped (`src/products/products.service.ts`).
+- **Test:** `test/products.e2e-spec.ts` → "500 on multi-level trees".
