@@ -1,6 +1,16 @@
-import { Controller, Get, Post, Delete, Body, Param, Query, ParseIntPipe } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Delete,
+  Body,
+  Param,
+  Query,
+  ParseIntPipe,
+} from '@nestjs/common';
 import { ProductsService } from './products.service';
 import { CreateProductDto, CreateCategoryDto } from './dto/create-product.dto';
+import { ProcessBatchDto } from './dto/process-batch.dto';
 
 @Controller('products')
 export class ProductsController {
@@ -27,7 +37,7 @@ export class ProductsController {
   }
 
   @Post('batch')
-  processBatch(@Body() body: { productIds: number[] }) {
+  processBatch(@Body() body: ProcessBatchDto) {
     return this.productsService.processProductBatch(body.productIds);
   }
 

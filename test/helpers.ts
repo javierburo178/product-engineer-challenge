@@ -18,7 +18,13 @@ export async function bootTestApp(): Promise<INestApplication> {
   }).compile();
 
   const app = moduleRef.createNestApplication();
-  app.useGlobalPipes(new ValidationPipe({ transform: true }));
+  app.useGlobalPipes(
+    new ValidationPipe({
+      transform: true,
+      whitelist: true,
+      forbidNonWhitelisted: true,
+    }),
+  );
   await app.init();
   return app;
 }
@@ -27,7 +33,10 @@ export async function bootTestApp(): Promise<INestApplication> {
  * Restores the deterministic baseline: truncates + re-seeds every table and
  * clears the cache the app uses. Call in beforeEach so each test starts clean.
  */
-export async function resetDb(app: INestApplication, opts?: SeedOptions): Promise<void> {
+export async function resetDb(
+  app: INestApplication,
+  opts?: SeedOptions,
+): Promise<void> {
   await seed(app.get(DataSource), opts);
   await app.get<Cache>(CACHE_MANAGER).clear();
 }

@@ -21,7 +21,9 @@ describe('Orders (e2e)', () => {
   describe('GET /orders/:id/full — bug #1: circular reference makes it 500 for every order', () => {
     it('returns the order with its user and items without crashing', async () => {
       // seeded order 1: alice, PENDING, 2 items (product 1 x1, product 4 x2)
-      const res = await request(app.getHttpServer()).get('/orders/1/full').expect(200);
+      const res = await request(app.getHttpServer())
+        .get('/orders/1/full')
+        .expect(200);
 
       expect(res.body.id).toBe(1);
       expect(res.body.user.email).toBe('alice@example.com');
@@ -44,10 +46,14 @@ describe('Orders (e2e)', () => {
     it('confirms the order when the gateway succeeds', async () => {
       jest.spyOn(Math, 'random').mockReturnValue(0.9);
 
-      const res = await request(app.getHttpServer()).post('/orders/1/pay').expect(201);
+      const res = await request(app.getHttpServer())
+        .post('/orders/1/pay')
+        .expect(201);
       expect(res.body.success).toBe(true);
 
-      const order = await request(app.getHttpServer()).get('/orders/1').expect(200);
+      const order = await request(app.getHttpServer())
+        .get('/orders/1')
+        .expect(200);
       expect(order.body.status).toBe('confirmed');
     });
 
@@ -55,13 +61,17 @@ describe('Orders (e2e)', () => {
       jest.spyOn(Math, 'random').mockReturnValue(0.01);
 
       const started = Date.now();
-      const res = await request(app.getHttpServer()).post('/orders/1/pay').expect(503);
+      const res = await request(app.getHttpServer())
+        .post('/orders/1/pay')
+        .expect(503);
       const elapsed = Date.now() - started;
 
       expect(res.body.message).toMatch(/payment/i);
       expect(elapsed).toBeLessThan(5000); // 3 attempts, not 1000
 
-      const order = await request(app.getHttpServer()).get('/orders/1').expect(200);
+      const order = await request(app.getHttpServer())
+        .get('/orders/1')
+        .expect(200);
       expect(order.body.status).toBe('pending'); // unchanged on failure
     });
   });
@@ -71,7 +81,8 @@ describe('Orders (e2e)', () => {
       request(app.getHttpServer()).post('/orders').send(body);
     const getProduct = (id: number) =>
       request(app.getHttpServer()).get(`/products/${id}`).expect(200);
-    const listOrders = () => request(app.getHttpServer()).get('/orders').expect(200);
+    const listOrders = () =>
+      request(app.getHttpServer()).get('/orders').expect(200);
 
     it('creates the order, records the exact total and decrements stock', async () => {
       const res = await post({
@@ -96,7 +107,7 @@ describe('Orders (e2e)', () => {
       await post({
         userId: 1,
         items: [
-          { productId: 6, quantity: 1 },   // ok
+          { productId: 6, quantity: 1 }, // ok
           { productId: 6, quantity: 999 }, // 4K Monitor stock is 15 -> fails
         ],
       }).expect(400);
@@ -145,7 +156,9 @@ describe('Orders (e2e)', () => {
 
       const created = responses.filter((r) => r.status === 201).length;
       expect(created).toBe(7);
-      expect(responses.every((r) => r.status === 201 || r.status === 400)).toBe(true);
+      expect(responses.every((r) => r.status === 201 || r.status === 400)).toBe(
+        true,
+      );
 
       expect((await getProduct(6)).body.stock).toBe(1); // 15 - 7*2, never negative
     });
@@ -162,6 +175,73 @@ describe('Orders (e2e)', () => {
         .expect(201);
 
       expect((await getProduct(6)).body.stock).toBe(15); // put back
+    });
+
+    it('404s when the userId does not exist', async () => {
+      await post({
+        userId: 9999,
+        items: [{ productId: 4, quantity: 1 }],
+      }).expect(404);
+    });
+  });
+
+  describe('read + status endpoints', () => {
+    const http = () => request(app.getHttpServer());
+
+    it('GET /orders returns every order', async () => {
+      const res = await http().get('/orders').expect(200);
+      expect(res.body).toHaveLength(2);
+    });
+
+    it("GET /orders?userId=1 returns that user's orders", async () => {
+      const res = await http().get('/orders?userId=1').expect(200);
+      expect(res.body).toHaveLength(1);
+      expect(res.body[0].userId).toBe(1);
+    });
+
+    it('GET /orders?userId=99 returns an empty list', async () => {
+      const res = await http().get('/orders?userId=99').expect(200);
+      expect(res.body).toEqual([]);
+    });
+
+    it('GET /orders?userId=abc is a 400 (was a raw 500)', async () => {
+      await http().get('/orders?userId=abc').expect(400);
+    });
+
+    it('GET /orders/:id 404s / 400s appropriately', async () => {
+      await http().get('/orders/1').expect(200);
+      await http().get('/orders/9999').expect(404);
+      await http().get('/orders/abc').expect(400);
+    });
+
+    it('PATCH /orders/:id/status updates on a valid enum value', async () => {
+      const res = await http()
+        .patch('/orders/1/status')
+        .send({ status: 'shipped' })
+        .expect(200);
+      expect(res.body.status).toBe('shipped');
+    });
+
+    it('PATCH /orders/:id/status 400s on an invalid enum value (was a raw 500)', async () => {
+      await http()
+        .patch('/orders/1/status')
+        .send({ status: 'banana' })
+        .expect(400);
+    });
+
+    it('POST /orders/:id/pay 404s for a missing order', async () => {
+      await http().post('/orders/9999/pay').expect(404);
+    });
+
+    it('POST /orders/:id/pay 400s for an order that is not pending', async () => {
+      // seeded order 2 is CONFIRMED
+      const res = await http().post('/orders/2/pay').expect(400);
+      expect(res.body.message).toMatch(/cannot be paid/i);
+    });
+
+    it('POST /orders/:id/cancel 400s for a non-pending order, 404s for a missing one', async () => {
+      await http().post('/orders/2/cancel').expect(400); // CONFIRMED
+      await http().post('/orders/9999/cancel').expect(404);
     });
   });
 });

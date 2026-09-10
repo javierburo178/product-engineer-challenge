@@ -22,7 +22,10 @@ describe('Users (e2e)', () => {
     it('returns the seeded users', async () => {
       const res = await http().get('/users').expect(200);
       expect(res.body).toHaveLength(3);
-      expect(res.body[0]).toMatchObject({ email: 'alice@example.com', isActive: true });
+      expect(res.body[0]).toMatchObject({
+        email: 'alice@example.com',
+        isActive: true,
+      });
     });
   });
 
@@ -47,16 +50,25 @@ describe('Users (e2e)', () => {
         .post('/users')
         .send({ email: 'dave@example.com', name: 'Dave Grohl' })
         .expect(201);
-      expect(res.body).toMatchObject({ email: 'dave@example.com', isActive: true });
+      expect(res.body).toMatchObject({
+        email: 'dave@example.com',
+        isActive: true,
+      });
       expect(res.body.id).toBeDefined();
     });
 
     it('400s on an invalid email', async () => {
-      await http().post('/users').send({ email: 'not-an-email', name: 'X Y' }).expect(400);
+      await http()
+        .post('/users')
+        .send({ email: 'not-an-email', name: 'X Y' })
+        .expect(400);
     });
 
     it('400s on a too-short name', async () => {
-      await http().post('/users').send({ email: 'x@example.com', name: 'A' }).expect(400);
+      await http()
+        .post('/users')
+        .send({ email: 'x@example.com', name: 'A' })
+        .expect(400);
     });
 
     it('400s when required fields are missing', async () => {
@@ -68,6 +80,24 @@ describe('Users (e2e)', () => {
         .post('/users')
         .send({ email: 'alice@example.com', name: 'Not Alice' })
         .expect(409);
+    });
+
+    it('400s on unknown body properties — no mass-assignment of id/isActive', async () => {
+      await http()
+        .post('/users')
+        .send({
+          email: 'evil@example.com',
+          name: 'Evil',
+          id: 1,
+          isActive: false,
+        })
+        .expect(400);
+      // Alice (id 1) is untouched
+      const alice = await http().get('/users/1').expect(200);
+      expect(alice.body).toMatchObject({
+        email: 'alice@example.com',
+        isActive: true,
+      });
     });
   });
 

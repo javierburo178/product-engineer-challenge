@@ -1,4 +1,10 @@
-import { Injectable, NotFoundException, BadRequestException, Inject } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  ConflictException,
+  Inject,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
@@ -6,9 +12,13 @@ import { Cache } from 'cache-manager';
 import { Product } from './product.entity';
 import { Category } from './category.entity';
 import { CreateProductDto, CreateCategoryDto } from './dto/create-product.dto';
+import { pgErrorCode, PG_FK_VIOLATION } from '../common/db-errors';
 
 @Injectable()
 export class ProductsService {
+  /** Search cache keys issued this process, so they can be invalidated on write. */
+  private readonly searchCacheKeys = new Set<string>();
+
   constructor(
     @InjectRepository(Product)
     private productsRepository: Repository<Product>,
@@ -23,7 +33,7 @@ export class ProductsService {
   }
 
   async findOne(id: number): Promise<Product> {
-    const product = await this.productsRepository.findOne({ 
+    const product = await this.productsRepository.findOne({
       where: { id },
       relations: ['category'],
     });
@@ -35,33 +45,74 @@ export class ProductsService {
 
   async create(createProductDto: CreateProductDto): Promise<Product> {
     const product = this.productsRepository.create(createProductDto);
-    return this.productsRepository.save(product);
+    let saved: Product;
+    try {
+      saved = await this.productsRepository.save(product);
+    } catch (err) {
+      if (pgErrorCode(err) === PG_FK_VIOLATION) {
+        throw new NotFoundException(
+          `Category #${createProductDto.categoryId} not found`,
+        );
+      }
+      throw err;
+    }
+    await this.invalidateSearchCache();
+    return saved;
   }
 
   async remove(id: number): Promise<void> {
-    const product = await this.findOne(id);
-    await this.productsRepository.remove(product);
+    // Delete by id (no entity load); a FK violation means the product is still
+    // referenced by order items.
+    let affected: number | null | undefined;
+    try {
+      ({ affected } = await this.productsRepository.delete(id));
+    } catch (err) {
+      if (pgErrorCode(err) === PG_FK_VIOLATION) {
+        throw new ConflictException(
+          `Product #${id} is referenced by existing orders and cannot be deleted`,
+        );
+      }
+      throw err;
+    }
+    if (!affected) {
+      throw new NotFoundException(`Product #${id} not found`);
+    }
+    await this.invalidateSearchCache();
   }
 
   async searchProducts(query: string): Promise<Product[]> {
-    const cacheKey = `product-search:${query.toLowerCase().trim()}`;
+    const term = query.toLowerCase().trim();
+    const cacheKey = `product-search:${term}`;
+    this.searchCacheKeys.add(cacheKey);
+
     const cached = await this.cacheManager.get<Product[]>(cacheKey);
     if (cached) {
       return cached;
     }
 
     const products = await this.productsRepository.find();
-    const results = products.filter(p => 
-      p.name.toLowerCase().includes(query.toLowerCase()) ||
-      (p.description || '').toLowerCase().includes(query.toLowerCase())
+    const results = products.filter(
+      (p) =>
+        p.name.toLowerCase().includes(term) ||
+        (p.description || '').toLowerCase().includes(term),
     );
 
     await this.cacheManager.set(cacheKey, results, 60000);
     return results;
   }
 
+  /** Drops every search result cached this process. */
+  private async invalidateSearchCache(): Promise<void> {
+    await Promise.all(
+      [...this.searchCacheKeys].map((key) => this.cacheManager.del(key)),
+    );
+    this.searchCacheKeys.clear();
+  }
+
   async findAllCategories(): Promise<Category[]> {
-    return this.categoriesRepository.find({ relations: ['parent', 'children'] });
+    return this.categoriesRepository.find({
+      relations: ['parent', 'children'],
+    });
   }
 
   async findCategory(id: number): Promise<Category> {
@@ -77,7 +128,14 @@ export class ProductsService {
 
   async createCategory(dto: CreateCategoryDto): Promise<Category> {
     const category = this.categoriesRepository.create(dto);
-    return this.categoriesRepository.save(category);
+    try {
+      return await this.categoriesRepository.save(category);
+    } catch (err) {
+      if (pgErrorCode(err) === PG_FK_VIOLATION) {
+        throw new NotFoundException(`Category #${dto.parentId} not found`);
+      }
+      throw err;
+    }
   }
 
   async getCategoryTree(categoryId: number): Promise<any> {
@@ -98,7 +156,9 @@ export class ProductsService {
       id: category!.id,
       name: category!.name,
       children: await Promise.all(
-        (category!.children ?? []).map((child) => this.buildCategoryTree(child.id)),
+        (category!.children ?? []).map((child) =>
+          this.buildCategoryTree(child.id),
+        ),
       ),
     };
   }

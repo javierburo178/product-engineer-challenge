@@ -3,12 +3,9 @@ import {
   NotFoundException,
   BadRequestException,
   ServiceUnavailableException,
-  Inject,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource, MoreThanOrEqual } from 'typeorm';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import { Cache } from 'cache-manager';
 import { Order, OrderStatus } from './order.entity';
 import { OrderItem } from './order-item.entity';
 import { Product } from '../products/product.entity';
@@ -18,15 +15,18 @@ import { withRetry } from '../common/with-retry';
 import { toCents, fromCents } from '../common/money';
 
 const paymentService = {
-  async processPayment(orderId: number, amount: number): Promise<{ success: boolean; transactionId: string }> {
-    await new Promise(resolve => setTimeout(resolve, 100));
-    
+  async processPayment(
+    orderId: number,
+    amount: number,
+  ): Promise<{ success: boolean; transactionId: string }> {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
     if (Math.random() < 0.1) {
       throw new Error('Payment service unavailable');
     }
-    
+
     return { success: true, transactionId: `TXN-${Date.now()}` };
-  }
+  },
 };
 
 @Injectable()
@@ -38,18 +38,16 @@ export class OrdersService {
     private ordersRepository: Repository<Order>,
     private usersService: UsersService,
     private dataSource: DataSource,
-    @Inject(CACHE_MANAGER)
-    private cacheManager: Cache,
   ) {}
 
   async findAll(): Promise<Order[]> {
-    return this.ordersRepository.find({ 
-      relations: ['user', 'items', 'items.product'] 
+    return this.ordersRepository.find({
+      relations: ['user', 'items', 'items.product'],
     });
   }
 
   async findOne(id: number): Promise<Order> {
-    const order = await this.ordersRepository.findOne({ 
+    const order = await this.ordersRepository.findOne({
       where: { id },
       relations: ['user', 'items', 'items.product'],
     });
@@ -60,7 +58,7 @@ export class OrdersService {
   }
 
   async findByUser(userId: number): Promise<Order[]> {
-    return this.ordersRepository.find({ 
+    return this.ordersRepository.find({
       where: { userId },
       relations: ['items', 'items.product'],
     });
@@ -87,7 +85,9 @@ export class OrdersService {
           where: { id: itemDto.productId },
         });
         if (!product) {
-          throw new NotFoundException(`Product #${itemDto.productId} not found`);
+          throw new NotFoundException(
+            `Product #${itemDto.productId} not found`,
+          );
         }
 
         // Atomic conditional decrement: Postgres computes `stock - qty` and the
@@ -126,13 +126,24 @@ export class OrdersService {
     return this.ordersRepository.save(order);
   }
 
-  async processPayment(orderId: number): Promise<{ success: boolean; transactionId: string }> {
+  async processPayment(
+    orderId: number,
+  ): Promise<{ success: boolean; transactionId: string }> {
     const order = await this.findOne(orderId);
+
+    if (order.status !== OrderStatus.PENDING) {
+      throw new BadRequestException(
+        `Order #${orderId} is ${order.status} and cannot be paid`,
+      );
+    }
 
     let result: { success: boolean; transactionId: string };
     try {
       result = await withRetry(async () => {
-        const attempt = await paymentService.processPayment(orderId, Number(order.total));
+        const attempt = await paymentService.processPayment(
+          orderId,
+          Number(order.total),
+        );
         if (!attempt.success) {
           throw new Error('Payment was declined');
         }
@@ -153,7 +164,10 @@ export class OrdersService {
 
   async cancel(id: number): Promise<Order> {
     await this.dataSource.transaction(async (manager) => {
-      const order = await manager.findOne(Order, { where: { id }, relations: ['items'] });
+      const order = await manager.findOne(Order, {
+        where: { id },
+        relations: ['items'],
+      });
       if (!order) {
         throw new NotFoundException(`Order #${id} not found`);
       }
@@ -163,7 +177,12 @@ export class OrdersService {
 
       // Atomic relative increment to put stock back — no read-modify-write.
       for (const item of order.items) {
-        await manager.increment(Product, { id: item.productId }, 'stock', item.quantity);
+        await manager.increment(
+          Product,
+          { id: item.productId },
+          'stock',
+          item.quantity,
+        );
       }
 
       order.status = OrderStatus.CANCELLED;
@@ -178,14 +197,18 @@ export class OrdersService {
       where: { id },
       relations: ['user', 'items', 'items.product', 'items.product.category'],
     });
-    
+
     if (!order) {
       throw new NotFoundException(`Order #${id} not found`);
     }
 
-    const enriched: any = { ...order };
-    enriched.user = { ...order.user };
-    enriched.user.latestOrder = { ...order, user: undefined };
+    // Rebuild as a plain object. `user.latestOrder` points back at the order,
+    // but without its nested `user`, so JSON serialization stays acyclic.
+    const { user, ...orderRest } = order;
+    const enriched = {
+      ...orderRest,
+      user: { ...user, latestOrder: { ...orderRest } },
+    };
 
     return JSON.parse(JSON.stringify(enriched));
   }

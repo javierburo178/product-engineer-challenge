@@ -37,11 +37,13 @@ describe('Cache (e2e)', () => {
 
       const app = await bootTestApp();
       try {
-        await app.get<Cache>(CACHE_MANAGER).set(`db:probe:${Date.now()}`, 'x', 60000);
+        await app
+          .get<Cache>(CACHE_MANAGER)
+          .set(`db:probe:${Date.now()}`, 'x', 60000);
         expect(await client.dbSize()).toBeGreaterThan(0);
       } finally {
         await app.close();
-        await client.destroy();
+        await client.close();
       }
     });
   });
@@ -100,7 +102,9 @@ describe('Cache (e2e)', () => {
         .expect(201);
 
       const after = await http().get('/users').expect(200);
-      expect(after.body.map((u: { email: string }) => u.email)).toContain('new@example.com');
+      expect(after.body.map((u: { email: string }) => u.email)).toContain(
+        'new@example.com',
+      );
     });
 
     it('invalidates entry + list cache when a user is deleted', async () => {

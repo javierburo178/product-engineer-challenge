@@ -53,3 +53,41 @@ cause → fix, with the guarding test in `test/*.e2e-spec.ts`.
 - **Cause:** `DELETE /users/:id` for a user with orders hit a FK violation, and `POST /users` with an existing email hit a unique violation — both bubbled up as `500 Internal server error`.
 - **Fix (`src/users/users.service.ts`, helper `src/common/db-errors.ts`):** map PostgreSQL `23503` (FK) and `23505` (unique) to `409 Conflict` with a clear message; `remove` also deletes by id (no entity load) and 404s when nothing was deleted.
 - **Test:** `test/users.e2e-spec.ts` → full endpoint sweep incl. "409s on a duplicate email" and "409s when the user still has orders".
+
+## #12 — `ValidationPipe` had no `whitelist` → mass-assignment
+- **Cause:** `new ValidationPipe({ transform: true })` kept unknown body properties. `POST /users {"email":…,"name":…,"id":1}` → `repository.create` copied `id`, `save` performed an **UPDATE of user #1** and returned it as a 201 "create". Same vector on `POST /products` / `POST /categories` (`isAvailable`, `stock`, …).
+- **Fix:** `ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: true })` in `src/main.ts` and `test/helpers.ts` (kept identical) — unknown properties now 400.
+- **Test:** `test/users.e2e-spec.ts` / `products` / `categories` → "400s on unknown body properties" (+ asserts user #1 untouched).
+
+## #13 — `POST /products` / `POST /categories` raw 500 on a non-existent FK
+- **Cause:** `categoryId` / `parentId` pointing at a missing row hit PG FK violation `23503` → `500`. `ProductsService` never used the `db-errors.ts` helper that `UsersService` already had.
+- **Fix (`src/products/products.service.ts`):** `create` / `createCategory` map `23503` → `404 Not Found` (`Category #<id> not found`).
+- **Test:** `test/products.e2e-spec.ts` / `categories` → "404s when categoryId/parentId does not exist".
+
+## #14 — `DELETE /products/:id` raw 500 when the product is in an order
+- **Cause:** `productsRepository.remove(product)` on a referenced product → FK violation `23503` → `500`.
+- **Fix:** `remove` deletes by id (no entity load), 404s on `affected === 0`, and maps `23503` → `409 Conflict`.
+- **Test:** `test/products.e2e-spec.ts` → "409s when the product is referenced by an order".
+
+## #15 — `GET /orders?userId=<non-numeric>` raw 500
+- **Cause:** `parseInt('abc')` → `NaN` → `find({ where: { userId: NaN } })` → PG `invalid input syntax for type integer` → `500`. The `:id` routes had `ParseIntPipe`; this query param did not.
+- **Fix (`src/orders/orders.controller.ts`):** `@Query('userId', new ParseIntPipe({ optional: true }))` → absent = list all, non-integer = `400`.
+- **Test:** `test/orders.e2e-spec.ts` → "GET /orders?userId=abc is a 400".
+
+## #16 — `POST /orders/:id/pay` had no state guard
+- **Cause:** paying a `cancelled` (or already `confirmed`) order flipped it to `confirmed` again; stock returned by a prior cancel was never re-taken. Also allowed double payment.
+- **Fix (`src/orders/orders.service.ts`):** `processPayment` throws `400` unless the order is `pending`.
+- **Test:** `test/orders.e2e-spec.ts` → "400s for an order that is not pending".
+
+## #17 — audit sweep: smaller correctness fixes
+- **`product-search:*` cache never invalidated** on `POST`/`DELETE /products` → stale results up to 60s ("cache does not match expectations"). Fix: `ProductsService` tracks issued search keys and drops them on `create`/`remove` (`invalidateSearchCache`). Test: `products.e2e-spec.ts` → "invalidates the search cache when a product is created".
+- **`PATCH /orders/:id/status` accepted any string** → PG enum error `22P02` → 500. Fix: `UpdateOrderStatusDto` with `@IsEnum(OrderStatus)` → 400. (Transition rules — e.g. blocking `delivered → pending` — left out of scope: no reported symptom covers them.)
+- **`POST /products/batch` had no input validation** (raw PG text leaked for non-integer ids). Fix: `ProcessBatchDto` (`@IsArray` `@ArrayNotEmpty` `@IsInt({ each: true })`).
+- **Dead code:** removed the unused `CACHE_MANAGER` injection from `OrdersService`, the unused `IsBoolean` import, and the redundant `test/app.e2e-spec.ts` (duplicated `src/app.controller.spec.ts`, leaked open handles).
+- **Test infra:** `pnpm test:e2e` runs with `--forceExit`; `scripts/smoke.sh` exercises every endpoint over HTTP; see `API-GUIDE.md`.
+
+### Deliberately NOT changed (would be scope creep for a "fix the reported bugs" task)
+- `POST /orders` does not reject `isAvailable: false` products — that is a new business rule, not a reported symptom.
+- `searchProducts` still loads the table and filters in JS — a latency note, not a "never completes" bug.
+- Response shapes still differ between list and detail endpoints (`GET /products` vs `/search`, `GET /orders` vs `?userId=`) — cosmetic, no symptom.
+- `PATCH /orders/:id/status` still allows any status→status move.
