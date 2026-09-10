@@ -65,4 +65,103 @@ describe('Orders (e2e)', () => {
       expect(order.body.status).toBe('pending'); // unchanged on failure
     });
   });
+
+  describe('POST /orders — bug #4/#5: no transaction + unawaited stock update', () => {
+    const post = (body: Record<string, unknown>) =>
+      request(app.getHttpServer()).post('/orders').send(body);
+    const getProduct = (id: number) =>
+      request(app.getHttpServer()).get(`/products/${id}`).expect(200);
+    const listOrders = () => request(app.getHttpServer()).get('/orders').expect(200);
+
+    it('creates the order, records the exact total and decrements stock', async () => {
+      const res = await post({
+        userId: 1,
+        items: [
+          { productId: 1, quantity: 1 }, // Laptop Pro 15 @ 1899.99, stock 25
+          { productId: 4, quantity: 2 }, // Wireless Mouse @ 49.99, stock 200
+        ],
+      }).expect(201);
+
+      expect(res.body.total).toBe('1999.97'); // 1899.99 + 2 * 49.99
+      expect(res.body.status).toBe('pending');
+      expect(res.body.items).toHaveLength(2);
+
+      expect((await getProduct(1)).body.stock).toBe(24);
+      expect((await getProduct(4)).body.stock).toBe(198);
+    });
+
+    it('rolls back completely when a later item has insufficient stock', async () => {
+      const before = (await listOrders()).body.length;
+
+      await post({
+        userId: 1,
+        items: [
+          { productId: 6, quantity: 1 },   // ok
+          { productId: 6, quantity: 999 }, // 4K Monitor stock is 15 -> fails
+        ],
+      }).expect(400);
+
+      expect((await listOrders()).body).toHaveLength(before); // no orphan order
+      expect((await getProduct(6)).body.stock).toBe(15); // first decrement rolled back
+    });
+
+    it('rolls back when an item references a missing product', async () => {
+      await post({
+        userId: 1,
+        items: [
+          { productId: 4, quantity: 1 },
+          { productId: 9999, quantity: 1 },
+        ],
+      }).expect(404);
+
+      expect((await getProduct(4)).body.stock).toBe(200); // untouched
+      expect((await listOrders()).body).toHaveLength(2); // only the seeded ones
+    });
+
+    it('rejects an order with no items', async () => {
+      await post({ userId: 1, items: [] }).expect(400);
+    });
+
+    it('sums a multi-item total exactly', async () => {
+      const res = await post({
+        userId: 1,
+        items: [
+          { productId: 8, quantity: 1 }, // 24.99
+          { productId: 7, quantity: 1 }, // 89.99
+          { productId: 4, quantity: 1 }, // 49.99
+        ],
+      }).expect(201);
+
+      expect(res.body.total).toBe('164.97'); // naive float sum: 164.96999999999997
+    });
+
+    it('does not oversell under concurrent orders for the same product', async () => {
+      // product 6: stock 15. Ten concurrent orders of qty 2 -> at most 7 succeed.
+      const responses = await Promise.all(
+        Array.from({ length: 10 }, () =>
+          post({ userId: 1, items: [{ productId: 6, quantity: 2 }] }),
+        ),
+      );
+
+      const created = responses.filter((r) => r.status === 201).length;
+      expect(created).toBe(7);
+      expect(responses.every((r) => r.status === 201 || r.status === 400)).toBe(true);
+
+      expect((await getProduct(6)).body.stock).toBe(1); // 15 - 7*2, never negative
+    });
+
+    it('restores stock atomically when a pending order is cancelled', async () => {
+      const created = await post({
+        userId: 1,
+        items: [{ productId: 6, quantity: 3 }],
+      }).expect(201);
+      expect((await getProduct(6)).body.stock).toBe(12);
+
+      await request(app.getHttpServer())
+        .post(`/orders/${created.body.id}/cancel`)
+        .expect(201);
+
+      expect((await getProduct(6)).body.stock).toBe(15); // put back
+    });
+  });
 });

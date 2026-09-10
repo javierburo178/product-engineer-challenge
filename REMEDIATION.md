@@ -27,3 +27,16 @@ Each entry: symptom → root cause → fix. Test that guards it in `test/*.e2e-s
 - **Fix:** retry loop extracted to `src/common/with-retry.ts` and called with `maxRetries = 3`; exhaustion now throws `ServiceUnavailableException` (HTTP 503) with the underlying reason. Order stays `pending` on failure.
 - **Test:** `test/orders.e2e-spec.ts` → "1000 retries + raw Error on failure".
 - **Follow-up (out of scope here):** resilience for external calls (backoff + jitter, timeout, circuit breaker) belongs in a shared policy, and the fake `paymentService` const should become an injectable provider so it can be swapped/retried at the infrastructure layer rather than inside `OrdersService`.
+
+## #4 / #5 — `POST /orders` leaves partial data and oversells under load
+- **Cause:**
+  - `create` had no transaction: the order and each `order_item` were persisted immediately, so a later failed stock check left an orphan order (`total: 0`) + partial items.
+  - `productsService.updateStock(...)` was called **without `await`** (fire-and-forget): the response raced the write, failures became unhandled rejections, and it did a read-modify-write of an *absolute* stock value from a stale read → lost updates / overselling under concurrency.
+- **Fix (`src/orders/orders.service.ts`):**
+  - `create` and `cancel` now run inside `dataSource.transaction(...)`; any failure rolls the whole thing back.
+  - stock moves via atomic relative SQL: `manager.decrement(Product, { id, stock: MoreThanOrEqual(qty) }, 'stock', qty)` (guard `affected === 1`) on create, `manager.increment(...)` on cancel. Two concurrent orders can no longer both pass the stock check.
+  - order total is summed in integer cents (`src/common/money.ts`) instead of adding floats.
+  - dead `ProductsService.updateStock` removed; `OrdersModule` no longer imports `ProductsModule`.
+  - `CreateOrderDto.items` gains `@ArrayMinSize(1)`.
+- **Test:** `test/orders.e2e-spec.ts` → "no transaction + unawaited stock update" (rollback on bad stock / missing product, exact totals, 10-way concurrent no-oversell, cancel restores stock).
+- **Note (pre-existing, separate):** `OrdersService` still injects an unused `CACHE_MANAGER`; safe to drop in its own cleanup.

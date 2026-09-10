@@ -6,15 +6,16 @@ import {
   Inject,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, DataSource, MoreThanOrEqual } from 'typeorm';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 import { Order, OrderStatus } from './order.entity';
 import { OrderItem } from './order-item.entity';
+import { Product } from '../products/product.entity';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { UsersService } from '../users/users.service';
-import { ProductsService } from '../products/products.service';
 import { withRetry } from '../common/with-retry';
+import { toCents, fromCents } from '../common/money';
 
 const paymentService = {
   async processPayment(orderId: number, amount: number): Promise<{ success: boolean; transactionId: string }> {
@@ -35,10 +36,8 @@ export class OrdersService {
   constructor(
     @InjectRepository(Order)
     private ordersRepository: Repository<Order>,
-    @InjectRepository(OrderItem)
-    private orderItemsRepository: Repository<OrderItem>,
     private usersService: UsersService,
-    private productsService: ProductsService,
+    private dataSource: DataSource,
     @Inject(CACHE_MANAGER)
     private cacheManager: Cache,
   ) {}
@@ -69,37 +68,56 @@ export class OrdersService {
 
   async create(createOrderDto: CreateOrderDto): Promise<Order> {
     const user = await this.usersService.findOne(createOrderDto.userId);
-    
-    const order = this.ordersRepository.create({
-      userId: user.id,
-      status: OrderStatus.PENDING,
-    });
-    const savedOrder = await this.ordersRepository.save(order);
-    
-    let total = 0;
-    for (const itemDto of createOrderDto.items) {
-      const product = await this.productsService.findOne(itemDto.productId);
-      
-      if (product.stock < itemDto.quantity) {
-        throw new BadRequestException(`Not enough stock for ${product.name}`);
+
+    // One transaction for the whole order: if any item fails (missing product,
+    // not enough stock, DB error) everything below is rolled back — no orphan
+    // order, no partial items, no phantom stock movement.
+    const orderId = await this.dataSource.transaction(async (manager) => {
+      const order = await manager.save(
+        manager.create(Order, {
+          userId: user.id,
+          status: OrderStatus.PENDING,
+          total: 0,
+        }),
+      );
+
+      let totalCents = 0;
+      for (const itemDto of createOrderDto.items) {
+        const product = await manager.findOne(Product, {
+          where: { id: itemDto.productId },
+        });
+        if (!product) {
+          throw new NotFoundException(`Product #${itemDto.productId} not found`);
+        }
+
+        // Atomic conditional decrement: Postgres computes `stock - qty` and the
+        // `stock >= qty` guard means two concurrent orders can never both pass.
+        const decremented = await manager.decrement(
+          Product,
+          { id: product.id, stock: MoreThanOrEqual(itemDto.quantity) },
+          'stock',
+          itemDto.quantity,
+        );
+        if (!decremented.affected) {
+          throw new BadRequestException(`Not enough stock for ${product.name}`);
+        }
+
+        await manager.insert(OrderItem, {
+          orderId: order.id,
+          productId: product.id,
+          quantity: itemDto.quantity,
+          price: product.price,
+        });
+
+        totalCents += toCents(product.price) * itemDto.quantity;
       }
-      
-      const orderItem = this.orderItemsRepository.create({
-        orderId: savedOrder.id,
-        productId: product.id,
-        quantity: itemDto.quantity,
-        price: product.price,
-      });
-      
-      await this.orderItemsRepository.save(orderItem);
-      total += product.price * itemDto.quantity;
-      this.productsService.updateStock(product.id, product.stock - itemDto.quantity);
-    }
-    
-    savedOrder.total = total;
-    await this.ordersRepository.save(savedOrder);
-    
-    return this.findOne(savedOrder.id);
+
+      order.total = fromCents(totalCents);
+      await manager.save(order);
+      return order.id;
+    });
+
+    return this.findOne(orderId);
   }
 
   async updateStatus(id: number, status: OrderStatus): Promise<Order> {
@@ -134,19 +152,25 @@ export class OrdersService {
   }
 
   async cancel(id: number): Promise<Order> {
-    const order = await this.findOne(id);
-    
-    if (order.status !== OrderStatus.PENDING) {
-      throw new BadRequestException('Only pending orders can be cancelled');
-    }
-    
-    for (const item of order.items) {
-      const product = await this.productsService.findOne(item.productId);
-      await this.productsService.updateStock(product.id, product.stock + item.quantity);
-    }
-    
-    order.status = OrderStatus.CANCELLED;
-    return this.ordersRepository.save(order);
+    await this.dataSource.transaction(async (manager) => {
+      const order = await manager.findOne(Order, { where: { id }, relations: ['items'] });
+      if (!order) {
+        throw new NotFoundException(`Order #${id} not found`);
+      }
+      if (order.status !== OrderStatus.PENDING) {
+        throw new BadRequestException('Only pending orders can be cancelled');
+      }
+
+      // Atomic relative increment to put stock back — no read-modify-write.
+      for (const item of order.items) {
+        await manager.increment(Product, { id: item.productId }, 'stock', item.quantity);
+      }
+
+      order.status = OrderStatus.CANCELLED;
+      await manager.save(order);
+    });
+
+    return this.findOne(id);
   }
 
   async getOrderWithFullDetails(id: number): Promise<any> {
