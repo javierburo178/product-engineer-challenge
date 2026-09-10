@@ -151,7 +151,7 @@ export class OrdersService {
 
     const enriched: any = { ...order };
     enriched.user = { ...order.user };
-    enriched.user.latestOrder = enriched;
+    enriched.user.latestOrder = { ...order, user: undefined };
 
     return JSON.parse(JSON.stringify(enriched));
   }
