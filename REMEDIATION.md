@@ -40,3 +40,9 @@ Each entry: symptom → root cause → fix. Test that guards it in `test/*.e2e-s
   - `CreateOrderDto.items` gains `@ArrayMinSize(1)`.
 - **Test:** `test/orders.e2e-spec.ts` → "no transaction + unawaited stock update" (rollback on bad stock / missing product, exact totals, 10-way concurrent no-oversell, cancel restores stock).
 - **Note (pre-existing, separate):** `OrdersService` still injects an unused `CACHE_MANAGER`; safe to drop in its own cleanup.
+
+## #7 / #8 — cache ran in-process memory, never Redis; DB index hard-coded to 0
+- **Cause:** `@nestjs/cache-manager@3` pulls `cache-manager@7` (Keyv-based, `stores: [...]` API), but the config passed `store: await redisStore(...)` from `cache-manager-ioredis-yet@2` (built for `cache-manager@5`). `cache-manager@7` ignores the unknown `store` key and silently falls back to an in-memory store — 0 keys ever reached Redis. `db: 0` was also hard-coded, ignoring `REDIS_DB`.
+- **Fix (`src/app.module.ts`):** store is now `createKeyv(`redis://${host}:${port}/${db}`)` from `@keyv/redis`, with `db` read from `REDIS_DB`. Dropped `cache-manager-ioredis-yet` + `ioredis`, added `@keyv/redis` (and `cache-manager` as a direct dep).
+- **Test:** `test/cache.e2e-spec.ts` — a value set on one app instance is readable from a second independent instance (only possible with a shared Redis), and writes land in the `REDIS_DB` logical DB (15 under `.env.test`), not 0.
+- **Aside:** on this machine Redis DB 0 already holds another app's Sidekiq keys — extra reason the index must come from config.
