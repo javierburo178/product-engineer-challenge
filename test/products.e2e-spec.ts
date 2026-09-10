@@ -42,4 +42,29 @@ describe('Products (e2e)', () => {
       expect(coffeeUpper.body.map((p: { name: string }) => p.name)).toEqual(['Coffee Maker']);
     });
   });
+
+  describe('POST /products/batch — bug #6: swallows errors, always reports success', () => {
+    it('reports which ids failed and marks the batch unsuccessful', async () => {
+      const res = await request(app.getHttpServer())
+        .post('/products/batch')
+        .send({ productIds: [1, 999] }) // 1 exists, 999 does not
+        .expect(201);
+
+      expect(res.body.processed).toBe(1);
+      // RED before fix: today returns { success: true, processed: 1 } and hides 999.
+      expect(res.body.success).toBe(false);
+      expect(res.body.failed).toEqual([
+        { id: 999, reason: 'Product #999 not found' },
+      ]);
+    });
+
+    it('marks the batch successful when every id processed', async () => {
+      const res = await request(app.getHttpServer())
+        .post('/products/batch')
+        .send({ productIds: [1, 2] })
+        .expect(201);
+
+      expect(res.body).toEqual({ success: true, processed: 2, failed: [] });
+    });
+  });
 });

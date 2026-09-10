@@ -109,24 +109,32 @@ export class ProductsService {
     return tree;
   }
 
-  async processProductBatch(productIds: number[]): Promise<{ success: boolean; processed: number }> {
-    let processed = 0;
-    
-    try {
-      for (const id of productIds) {
-        try {
-          const product = await this.findOne(id);
-          product.updatedAt = new Date();
-          await this.productsRepository.save(product);
-          processed++;
-        } catch (error) {
-          console.log('Error processing product');
-        }
-      }
-    } catch (error) {
-      throw new BadRequestException('Batch processing failed');
+  async processProductBatch(productIds: number[]): Promise<{
+    success: boolean;
+    processed: number;
+    failed: { id: number; reason: string }[];
+  }> {
+    if (!Array.isArray(productIds) || productIds.length === 0) {
+      throw new BadRequestException('productIds must be a non-empty array');
     }
 
-    return { success: true, processed };
+    const failed: { id: number; reason: string }[] = [];
+    let processed = 0;
+
+    for (const id of productIds) {
+      try {
+        const product = await this.findOne(id);
+        product.updatedAt = new Date();
+        await this.productsRepository.save(product);
+        processed++;
+      } catch (error) {
+        failed.push({
+          id,
+          reason: error instanceof Error ? error.message : 'Unknown error',
+        });
+      }
+    }
+
+    return { success: failed.length === 0, processed, failed };
   }
 }
